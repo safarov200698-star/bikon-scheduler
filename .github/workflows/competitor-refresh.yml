@@ -1,0 +1,61 @@
+# Background scheduler for the BIKON dashboard's "Uzum analiz".
+# Lives alone in the public repo safarov200698-star/bikon-scheduler at
+# .github/workflows/competitor-refresh.yml on main. The site accepts this exact file and lets it
+# start a competitor refresh only (it cannot import catalogs or read data).
+#
+# The repo is public, so its logs are public: this workflow never prints a response body,
+# only the HTTP status and the counters below. Actions minutes are free for public repos.
+name: competitor-refresh
+
+on:
+  schedule:
+    - cron: '7,37 * * * *'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: competitor-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Refresh Uzum competitor data
+        uses: actions/github-script@v7
+        env:
+          ENDPOINT: https://sozla-savdo-dashboard.safarov200698.chatgpt.site/api/competitors/cloud-catalog
+          CALLS: '3'
+        with:
+          script: |
+            const endpoint = process.env.ENDPOINT;
+            const calls = Number(process.env.CALLS) || 3;
+            let total = 0;
+            for (let i = 1; i <= calls; i++) {
+              // The audience must equal the endpoint URL; the site checks it.
+              const token = await core.getIDToken(endpoint);
+              const response = await fetch(endpoint, {
+                method: 'POST',
+                headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+                body: JSON.stringify({ action: 'refresh' }),
+                signal: AbortSignal.timeout(90000),
+              });
+              let body = {};
+              try { body = JSON.parse(await response.text()); } catch {}
+              // Public log: numbers and a fixed set of reason codes only, never response text.
+              const count = (value) => Number.isFinite(Number(value)) ? Number(value) : '-';
+              const knownReasons = ['source-cooldown', 'refresh-in-progress'];
+              const reason = knownReasons.includes(body.reason) ? body.reason : (body.reason ? 'other' : '-');
+              core.info(`call ${i}: HTTP ${response.status} refreshed=${count(body.refreshed)} failed=${count(body.failed)} reason=${reason}`);
+              if (!response.ok) { core.setFailed(`HTTP ${response.status}`); return; }
+              total += Number(body.refreshed) || 0;
+              // Stop early when Uzum asked us to wait or another refresh holds the lock.
+              if (body.skipped || body.retryAt) break;
+              if (i < calls) await new Promise((resolve) => setTimeout(resolve, 10000));
+            }
+            await core.summary.addRaw(`Refreshed ${total} competitor products`).write();
+
