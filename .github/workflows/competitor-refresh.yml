@@ -35,6 +35,7 @@ jobs:
             const endpoint = process.env.ENDPOINT;
             const calls = Number(process.env.CALLS) || 3;
             let total = 0;
+            let waits = 0;
             for (let i = 1; i <= calls; i++) {
               // The audience must equal the endpoint URL; the site checks it.
               const token = await core.getIDToken(endpoint);
@@ -53,8 +54,16 @@ jobs:
               core.info(`call ${i}: HTTP ${response.status} refreshed=${count(body.refreshed)} failed=${count(body.failed)} reason=${reason}`);
               if (!response.ok) { core.setFailed(`HTTP ${response.status}`); return; }
               total += Number(body.refreshed) || 0;
-              // Stop early when Uzum asked us to wait or another refresh holds the lock.
-              if (body.skipped || body.retryAt) break;
+              // Another refresh holds the lock (for example one started by an open page): it ends
+              // within seconds, so wait and retry the same call, at most three times per run.
+              if (body.reason === 'refresh-in-progress' && waits < 3) {
+                waits += 1;
+                i -= 1;
+                await new Promise((resolve) => setTimeout(resolve, 20000));
+                continue;
+              }
+              // Uzum asked us to pause: stop and let the next scheduled run try again.
+              if (body.reason === 'source-cooldown' || body.retryAt || body.skipped) break;
               if (i < calls) await new Promise((resolve) => setTimeout(resolve, 10000));
             }
             await core.summary.addRaw(`Refreshed ${total} competitor products`).write();
